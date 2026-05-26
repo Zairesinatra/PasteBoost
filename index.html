@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f5f6f2" />
+    <title>PasteBoost</title>
+  </head>
+  <body>
+    <div id="root">
+      <div id="boot-status" style="padding: 32px; font-family: 'Segoe UI', sans-serif; color: #67746d;">
+        正在加载 PasteBoost...
+      </div>
+    </div>
+    <script>
+      window.addEventListener("error", function (event) {
+        var status = document.getElementById("boot-status");
+        if (status) status.textContent = "加载失败：" + (event.message || "前端脚本无法启动");
+      });
+      window.addEventListener("unhandledrejection", function (event) {
+        var status = document.getElementById("boot-status");
+        var reason = event.reason && (event.reason.message || String(event.reason));
+        if (status) status.textContent = "初始化失败：" + (reason || "未知错误");
+      });
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
