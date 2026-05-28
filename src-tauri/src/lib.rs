@@ -14,7 +14,7 @@ use std::{
 use tauri::{
     image::Image,
     menu::{Menu, MenuItem},
-    tray::TrayIconBuilder,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, WebviewWindow,
 };
 use tauri_plugin_autostart::ManagerExt as AutostartExt;
@@ -755,8 +755,21 @@ pub fn run() {
                     "quit" => app.exit(0),
                     _ => {}
                 })
-                .on_tray_icon_event(|tray, _event| {
-                    show_window(tray.app_handle().get_webview_window("main"));
+                .on_tray_icon_event(|tray, event| {
+                    let should_show = matches!(
+                        event,
+                        TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } | TrayIconEvent::DoubleClick {
+                            button: MouseButton::Left,
+                            ..
+                        }
+                    );
+                    if should_show {
+                        show_window(tray.app_handle().get_webview_window("main"));
+                    }
                 })
                 .build(app)?;
             start_clipboard_listener(app.handle().clone());
