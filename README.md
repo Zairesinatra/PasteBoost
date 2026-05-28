@@ -33,6 +33,20 @@ pnpm tauri dev
 
 网页预览通过 `localStorage` 模拟历史和片段操作；Tauri 应用运行时会使用系统剪贴板与应用数据目录中的 SQLite 数据库。
 
+## 打包安装包
+
+构建 Windows 安装程序（.msi / .exe）：
+
+```powershell
+pnpm tauri build
+```
+
+构建产物会输出到 `src-tauri/target/release/bundle/` 目录下。
+
+- 首次打包时间较长（Rust 编译 + 前端构建），请保持网络畅通。
+- 默认会同时生成 `.msi` 和 `.exe`（NSIS）两种格式。
+- 如需只生成其中一种，可修改 `tauri.conf.json` 中 `bundle.targets` 的值为 `"msi"` 或 `"nsis"`。
+
 ## 目录
 
 - `src/`：React 界面、文本操作以及网页/Tauri 数据桥接。
