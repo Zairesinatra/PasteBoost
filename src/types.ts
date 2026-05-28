@@ -1,9 +1,10 @@
-export type ItemType = "text" | "json" | "url" | "email" | "code";
+export type ItemType = "text" | "json" | "url" | "email" | "code" | "image";
 
 export interface ClipboardItem {
   id: number;
   content: string;
   itemType: ItemType;
+  imageData?: string | null;
   isFavorite: boolean;
   createdAt: string;
   usedCount: number;

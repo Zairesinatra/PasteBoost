@@ -69,9 +69,33 @@ export async function captureText(content: string): Promise<void> {
 
 export async function captureCurrentClipboard(): Promise<void> {
   if (isDesktop) {
-    const { readText } = await import("@tauri-apps/plugin-clipboard-manager");
-    await captureText((await readText()) ?? "");
+    await invoke("capture_current_clipboard");
     return;
+  }
+  if (navigator.clipboard.read) {
+    const clipboardItems = await navigator.clipboard.read();
+    const imageType = clipboardItems[0]?.types.find((type) => type.startsWith("image/"));
+    if (imageType) {
+      const blob = await clipboardItems[0].getType(imageType);
+      const imageData = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.addEventListener("load", () => resolve(reader.result as string));
+        reader.addEventListener("error", () => reject(reader.error));
+        reader.readAsDataURL(blob);
+      });
+      const items = readLocal(ITEMS_KEY, demoItems).filter((item) => item.imageData !== imageData);
+      items.unshift({
+        id: Date.now(),
+        content: `[Image] ${Math.round(blob.size / 1024)} KB`,
+        imageData,
+        itemType: "image",
+        isFavorite: false,
+        createdAt: new Date().toISOString(),
+        usedCount: 0,
+      });
+      storeLocal(ITEMS_KEY, items);
+      return;
+    }
   }
   const text = await navigator.clipboard.readText();
   await captureText(text);
@@ -133,6 +157,19 @@ export async function pasteText(content: string, autoPaste = false): Promise<voi
   } else {
     await navigator.clipboard.writeText(content);
   }
+}
+
+export async function pasteItem(item: ClipboardItem, autoPaste = false): Promise<void> {
+  if (item.itemType !== "image" || !item.imageData) {
+    await pasteText(item.content, autoPaste);
+    return;
+  }
+  if (isDesktop) {
+    await invoke("paste_image", { id: item.id, autoPaste });
+    return;
+  }
+  const blob = await fetch(item.imageData).then((response) => response.blob());
+  await navigator.clipboard.write([new globalThis.ClipboardItem({ [blob.type]: blob })]);
 }
 
 export async function listSnippets(): Promise<Snippet[]> {

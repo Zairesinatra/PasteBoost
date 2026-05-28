@@ -7,6 +7,7 @@ import {
   Eraser,
   FileText,
   History,
+  ImageIcon,
   Keyboard,
   Pin,
   PinOff,
@@ -28,6 +29,7 @@ import {
   getSettings,
   listItems,
   listSnippets,
+  pasteItem,
   pasteText,
   reportFrontendReady,
   saveSettings,
@@ -155,13 +157,13 @@ function App() {
 
   const notify = (message: string) => setToast(message);
 
-  async function handlePaste(content: string) {
-    await pasteText(content, true);
+  async function handlePaste(item: ClipboardItem) {
+    await pasteItem(item, true);
     notify('已写入剪贴板并准备粘贴');
   }
 
-  async function handleCopy(content: string) {
-    await pasteText(content);
+  async function handleCopy(item: ClipboardItem) {
+    await pasteItem(item);
     notify('已复制');
   }
 
@@ -181,6 +183,10 @@ function App() {
   }
 
   async function handleMerge(copyOnly: boolean) {
+    if (selectedItems.some((item) => item.itemType === 'image')) {
+      notify(zh ? '图片不可参与合并，请仅选择文本记录' : 'Images cannot be merged with text');
+      return;
+    }
     const text = selectedItems.map((item) => item.content).join(separator);
     await pasteText(text, !copyOnly);
     notify(copyOnly ? '合并内容已复制' : '合并内容已准备粘贴');
@@ -285,7 +291,7 @@ function App() {
         {view === 'snippets' && (
           <SnippetsView
             snippets={snippets}
-            onCopy={handleCopy}
+            onCopy={(content) => void pasteText(content).then(() => notify('已复制'))}
             language={settings.language}
             onDelete={async (id) => {
               await deleteSnippet(id);
@@ -298,7 +304,9 @@ function App() {
             }}
           />
         )}
-        {view === 'formatter' && <FormatterView onCopy={handleCopy} language={settings.language} />}
+        {view === 'formatter' && (
+          <FormatterView onCopy={(content) => void pasteText(content).then(() => notify('已复制'))} language={settings.language} />
+        )}
         {view === 'settings' && (
           <SettingsView
             settings={settings}
@@ -341,8 +349,8 @@ interface HistoryProps {
   onFavorite: (id: number) => void;
   onDelete: (id: number) => void;
   onClear: () => void;
-  onCopy: (text: string) => void;
-  onPaste: (text: string) => void;
+  onCopy: (item: ClipboardItem) => void;
+  onPaste: (item: ClipboardItem) => void;
   onMerge: (copyOnly: boolean) => void;
   onDeleteSelected: () => void;
   language: AppSettings['language'];
@@ -350,6 +358,9 @@ interface HistoryProps {
 
 function HistoryView(props: HistoryProps) {
   const zh = props.language === 'zh-CN';
+  const containsImage = props.items
+    .filter((item) => props.selected.includes(item.id))
+    .some((item) => item.itemType === 'image');
   return (
     <section className="history-layout">
       <div className="content-column">
@@ -369,10 +380,10 @@ function HistoryView(props: HistoryProps) {
               <Trash2 size={15} />
               {zh ? '批量删除' : 'Delete'}
             </button>
-            <button className="secondary" onClick={() => props.onMerge(true)}>
+            <button className="secondary" disabled={containsImage} onClick={() => props.onMerge(true)}>
               {zh ? '合并复制' : 'Merge copy'}
             </button>
-            <button className="primary" onClick={() => props.onMerge(false)}>
+            <button className="primary" disabled={containsImage} onClick={() => props.onMerge(false)}>
               {zh ? '合并粘贴' : 'Merge paste'}
             </button>
           </div>
@@ -392,23 +403,30 @@ function HistoryView(props: HistoryProps) {
                 className={props.selected.includes(item.id) ? 'checkbox checked' : 'checkbox'}
                 onClick={() => props.onToggleSelect(item.id)}
               >
-                {props.selected.includes(item.id) && <Check size={13} />}
+                {props.selected.includes(item.id) && <Check size={17} strokeWidth={3} />}
               </button>
-              <div className="item-body" onDoubleClick={() => props.onPaste(item.content)}>
+              <div className="item-body" onDoubleClick={() => props.onPaste(item)}>
                 <div className="item-meta">
-                  <span className={`type ${item.itemType}`}>{item.itemType.toUpperCase()}</span>
+                  <span className={`type ${item.itemType}`}>
+                    {item.itemType === 'image' && <ImageIcon size={11} />}
+                    {item.itemType.toUpperCase()}
+                  </span>
                   <time>{timeAgo(item.createdAt, props.language)}</time>
                   {item.usedCount > 0 && (
                     <span>{zh ? `使用 ${item.usedCount} 次` : `Used ${item.usedCount} times`}</span>
                   )}
                 </div>
-                <p>{item.content}</p>
+                {item.itemType === 'image' && item.imageData ? (
+                  <img className="clip-image" src={item.imageData} alt={zh ? '剪贴板图片预览' : 'Clipboard image preview'} />
+                ) : (
+                  <p>{item.content}</p>
+                )}
               </div>
               <div className="item-actions">
-                <button title={zh ? '复制' : 'Copy'} onClick={() => props.onCopy(item.content)}>
+                <button title={zh ? '复制' : 'Copy'} onClick={() => props.onCopy(item)}>
                   <Copy size={16} />
                 </button>
-                <button title={zh ? '快速粘贴' : 'Quick paste'} onClick={() => props.onPaste(item.content)}>
+                <button title={zh ? '快速粘贴' : 'Quick paste'} onClick={() => props.onPaste(item)}>
                   <Scissors size={16} />
                 </button>
                 <button title={zh ? '置顶' : 'Pin'} onClick={() => props.onFavorite(item.id)}>
@@ -428,11 +446,13 @@ function HistoryView(props: HistoryProps) {
       <aside className="capture-panel">
         <div className="panel-title">
           <Plus size={16} />
-          {zh ? '添加文本' : 'Add text'}
+          {zh ? '添加内容' : 'Add content'}
         </div>
         <textarea
           placeholder={
-            zh ? '粘贴或输入一段文本，也可直接捕获系统剪贴板...' : 'Paste or type text, or capture the clipboard...'
+            zh
+              ? '粘贴或输入文本，也可直接捕获系统剪贴板中的文本或图片...'
+              : 'Paste or type text, or capture text or an image from the clipboard...'
           }
           value={props.captureDraft}
           onChange={(event) => props.setCaptureDraft(event.target.value)}

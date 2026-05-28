@@ -1,7 +1,18 @@
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use image::{DynamicImage, ImageFormat, RgbaImage};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::{fs, sync::Mutex, thread, time::Duration};
+use std::{
+    collections::hash_map::DefaultHasher,
+    fs,
+    hash::{Hash, Hasher},
+    io::Cursor,
+    sync::Mutex,
+    thread,
+    time::Duration,
+};
 use tauri::{
+    image::Image,
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
     AppHandle, Emitter, Manager, WebviewWindow,
@@ -18,6 +29,7 @@ struct ClipboardItem {
     id: i64,
     content: String,
     item_type: String,
+    image_data: Option<String>,
     is_favorite: bool,
     created_at: String,
     used_count: i64,
@@ -91,6 +103,7 @@ fn database(app: &AppHandle) -> Result<Connection, String> {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 content TEXT NOT NULL UNIQUE,
                 item_type TEXT NOT NULL,
+                image_data TEXT,
                 is_favorite INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 last_used_at TEXT,
@@ -110,6 +123,20 @@ fn database(app: &AppHandle) -> Result<Connection, String> {
             ",
         )
         .map_err(|error| error.to_string())?;
+    let has_image_data = connection
+        .prepare("PRAGMA table_info(clipboard_items)")
+        .and_then(|mut statement| {
+            let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+            Ok(columns
+                .filter_map(Result::ok)
+                .any(|column| column == "image_data"))
+        })
+        .map_err(|error| error.to_string())?;
+    if !has_image_data {
+        connection
+            .execute("ALTER TABLE clipboard_items ADD COLUMN image_data TEXT", [])
+            .map_err(|error| error.to_string())?;
+    }
     Ok(connection)
 }
 
@@ -179,10 +206,66 @@ fn insert_text(app: &AppHandle, content: String) -> Result<bool, String> {
     let changed = connection
         .execute(
             "
-            INSERT INTO clipboard_items (content, item_type) VALUES (?1, ?2)
-            ON CONFLICT(content) DO UPDATE SET created_at = datetime('now')
+            INSERT INTO clipboard_items (content, item_type, image_data) VALUES (?1, ?2, NULL)
+            ON CONFLICT(content) DO UPDATE SET created_at = datetime('now'), image_data = NULL
             ",
             params![trimmed, infer_type(trimmed)],
+        )
+        .map_err(|error| error.to_string())?
+        > 0;
+    connection
+        .execute(
+            "
+            DELETE FROM clipboard_items
+            WHERE is_favorite = 0 AND id NOT IN (
+                SELECT id FROM clipboard_items ORDER BY created_at DESC LIMIT ?1
+            )
+            ",
+            [settings.max_items],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(changed)
+}
+
+fn png_data_url(image: &Image<'_>) -> Result<String, String> {
+    let rgba = RgbaImage::from_raw(image.width(), image.height(), image.rgba().to_vec())
+        .ok_or_else(|| "无法读取图片像素".to_string())?;
+    let mut png = Cursor::new(Vec::new());
+    DynamicImage::ImageRgba8(rgba)
+        .write_to(&mut png, ImageFormat::Png)
+        .map_err(|error| error.to_string())?;
+    Ok(format!(
+        "data:image/png;base64,{}",
+        BASE64.encode(png.into_inner())
+    ))
+}
+
+fn image_signature(image: &Image<'_>) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    image.width().hash(&mut hasher);
+    image.height().hash(&mut hasher);
+    image.rgba().hash(&mut hasher);
+    hasher.finish()
+}
+
+fn insert_image(app: &AppHandle, image: &Image<'_>) -> Result<bool, String> {
+    let image_data = png_data_url(image)?;
+    let content = format!(
+        "[图片] {} x {} #{:016x}",
+        image.width(),
+        image.height(),
+        image_signature(image)
+    );
+    let state = app.state::<Database>();
+    let connection = state.0.lock().map_err(|error| error.to_string())?;
+    let settings = settings_from_connection(&connection);
+    let changed = connection
+        .execute(
+            "
+            INSERT INTO clipboard_items (content, item_type, image_data) VALUES (?1, 'image', ?2)
+            ON CONFLICT(content) DO UPDATE SET created_at = datetime('now'), image_data = excluded.image_data
+            ",
+            params![content, image_data],
         )
         .map_err(|error| error.to_string())?
         > 0;
@@ -208,7 +291,7 @@ fn list_items(app: AppHandle, query: String) -> Result<Vec<ClipboardItem>, Strin
     let mut statement = connection
         .prepare(
             "
-            SELECT id, content, item_type, is_favorite, created_at || 'Z', used_count
+            SELECT id, content, item_type, image_data, is_favorite, created_at || 'Z', used_count
             FROM clipboard_items
             WHERE content LIKE ?1
             ORDER BY is_favorite DESC, datetime(created_at) DESC
@@ -221,9 +304,10 @@ fn list_items(app: AppHandle, query: String) -> Result<Vec<ClipboardItem>, Strin
                 id: row.get(0)?,
                 content: row.get(1)?,
                 item_type: row.get(2)?,
-                is_favorite: row.get::<_, i64>(3)? != 0,
-                created_at: row.get(4)?,
-                used_count: row.get(5)?,
+                image_data: row.get(3)?,
+                is_favorite: row.get::<_, i64>(4)? != 0,
+                created_at: row.get(5)?,
+                used_count: row.get(6)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -234,6 +318,22 @@ fn list_items(app: AppHandle, query: String) -> Result<Vec<ClipboardItem>, Strin
 #[tauri::command]
 fn capture_text(app: AppHandle, content: String) -> Result<(), String> {
     if insert_text(&app, content)? {
+        app.emit("clipboard-updated", ())
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn capture_current_clipboard(app: AppHandle) -> Result<(), String> {
+    let changed = if let Ok(image) = app.clipboard().read_image() {
+        insert_image(&app, &image)?
+    } else if let Ok(content) = app.clipboard().read_text() {
+        insert_text(&app, content)?
+    } else {
+        false
+    };
+    if changed {
         app.emit("clipboard-updated", ())
             .map_err(|error| error.to_string())?;
     }
@@ -494,6 +594,57 @@ fn paste_text(app: AppHandle, content: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn paste_image(app: AppHandle, id: i64, auto_paste: bool) -> Result<(), String> {
+    let data_url = {
+        let state = app.state::<Database>();
+        let value = state
+            .0
+            .lock()
+            .map_err(|error| error.to_string())?
+            .query_row(
+                "SELECT image_data FROM clipboard_items WHERE id = ?1 AND item_type = 'image'",
+                [id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .flatten()
+            .ok_or_else(|| "找不到图片记录".to_string())?;
+        value
+    };
+    let encoded = data_url
+        .strip_prefix("data:image/png;base64,")
+        .ok_or_else(|| "图片格式无效".to_string())?;
+    let bytes = BASE64.decode(encoded).map_err(|error| error.to_string())?;
+    let rgba = image::load_from_memory(&bytes)
+        .map_err(|error| error.to_string())?
+        .into_rgba8();
+    let (width, height) = rgba.dimensions();
+    let clipboard_image = Image::new_owned(rgba.into_raw(), width, height);
+    app.clipboard()
+        .write_image(&clipboard_image)
+        .map_err(|error| error.to_string())?;
+    if auto_paste {
+        let state = app.state::<Database>();
+        state
+            .0
+            .lock()
+            .map_err(|error| error.to_string())?
+            .execute(
+                "UPDATE clipboard_items SET used_count = used_count + 1, last_used_at = datetime('now') WHERE id = ?1",
+                [id],
+            )
+            .map_err(|error| error.to_string())?;
+        if let Some(window) = app.get_webview_window("main") {
+            window.hide().map_err(|error| error.to_string())?;
+        }
+        thread::sleep(Duration::from_millis(100));
+        send_paste_keys();
+    }
+    Ok(())
+}
+
 fn show_window(window: Option<WebviewWindow>) {
     if let Some(window) = window {
         let _ = window.show();
@@ -503,7 +654,7 @@ fn show_window(window: Option<WebviewWindow>) {
 
 fn start_clipboard_listener(app: AppHandle) {
     thread::spawn(move || {
-        let mut last_content = String::new();
+        let mut last_signature = String::new();
         loop {
             thread::sleep(Duration::from_millis(650));
             let listening = {
@@ -517,9 +668,20 @@ fn start_clipboard_listener(app: AppHandle) {
             if !listening {
                 continue;
             }
+            if let Ok(image) = app.clipboard().read_image() {
+                let signature = format!("image:{:016x}", image_signature(&image));
+                if signature != last_signature {
+                    last_signature = signature;
+                    if insert_image(&app, &image).unwrap_or(false) {
+                        let _ = app.emit("clipboard-updated", ());
+                    }
+                }
+                continue;
+            }
             if let Ok(content) = app.clipboard().read_text() {
-                if content != last_content {
-                    last_content = content.clone();
+                let signature = format!("text:{content}");
+                if signature != last_signature {
+                    last_signature = signature;
                     if insert_text(&app, content).unwrap_or(false) {
                         let _ = app.emit("clipboard-updated", ());
                     }
@@ -609,6 +771,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_items,
             capture_text,
+            capture_current_clipboard,
             toggle_favorite,
             delete_item,
             delete_items,
@@ -619,7 +782,8 @@ pub fn run() {
             get_settings,
             save_settings,
             frontend_ready,
-            paste_text
+            paste_text,
+            paste_image
         ])
         .run(tauri::generate_context!())
         .expect("failed to run PasteBoost");
