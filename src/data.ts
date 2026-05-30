@@ -66,6 +66,7 @@ export const defaultSettings: AppSettings = {
   autostartEnabled: false,
   protectSensitive: true,
   hotkey: "Ctrl+Shift+V",
+  screenshotHotkey: "Super+F1",
   maxItems: 500,
   theme: "light",
   language: "zh-CN",

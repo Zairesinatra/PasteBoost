@@ -1,5 +1,5 @@
 import { defaultSettings, demoItems, demoSnippets } from "./data";
-import type { AppSettings, ClipboardItem, ItemType, Snippet } from "./types";
+import type { AppSettings, ClipboardItem, ItemType, ScreenshotSelection, ScreenshotSession, Snippet } from "./types";
 
 const ITEMS_KEY = "pasteboost.items";
 const SNIPPETS_KEY = "pasteboost.snippets";
@@ -99,6 +99,26 @@ export async function captureCurrentClipboard(): Promise<void> {
   }
   const text = await navigator.clipboard.readText();
   await captureText(text);
+}
+
+export async function startScreenshot(): Promise<void> {
+  if (!isDesktop) throw new Error("Screenshot capture is only available in the desktop app");
+  await invoke("start_screenshot");
+}
+
+export async function getScreenshotSession(): Promise<ScreenshotSession> {
+  if (!isDesktop) throw new Error("Screenshot capture is only available in the desktop app");
+  return invoke("get_screenshot_session");
+}
+
+export async function finishScreenshot(selection: ScreenshotSelection): Promise<void> {
+  if (!isDesktop) return;
+  await invoke("finish_screenshot", { selection });
+}
+
+export async function cancelScreenshot(): Promise<void> {
+  if (!isDesktop) return;
+  await invoke("cancel_screenshot");
 }
 
 export async function toggleFavorite(id: number): Promise<void> {

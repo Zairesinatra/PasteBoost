@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Braces,
   Check,
@@ -22,10 +22,13 @@ import {
 import {
   captureCurrentClipboard,
   captureText,
+  cancelScreenshot,
   clearUnpinned,
   deleteItem,
   deleteItems,
   deleteSnippet,
+  finishScreenshot,
+  getScreenshotSession,
   getSettings,
   listItems,
   listSnippets,
@@ -34,6 +37,7 @@ import {
   reportFrontendReady,
   saveSettings,
   saveSnippet,
+  startScreenshot,
   subscribeToPanelOpen,
   subscribeToSettings,
   subscribeToUpdates,
@@ -53,6 +57,7 @@ const initialSettings: AppSettings = {
   autostartEnabled: false,
   protectSensitive: true,
   hotkey: 'Ctrl+Shift+V',
+  screenshotHotkey: 'Super+F1',
   maxItems: 500,
   theme: 'light',
   language: 'zh-CN',
@@ -73,6 +78,10 @@ function timeAgo(date: string, language: AppSettings['language']) {
 }
 
 function App() {
+  if (window.location.search.includes('snip=1')) {
+    return <ScreenshotOverlay />;
+  }
+
   const [view, setView] = useState<ViewId>('history');
   const [items, setItems] = useState<ClipboardItem[]>([]);
   const [snippets, setSnippets] = useState<Snippet[]>([]);
@@ -157,11 +166,6 @@ function App() {
 
   const notify = (message: string) => setToast(message);
 
-  async function handlePaste(item: ClipboardItem) {
-    await pasteItem(item, true);
-    notify('已写入剪贴板并准备粘贴');
-  }
-
   async function handleCopy(item: ClipboardItem) {
     await pasteItem(item);
     notify('已复制');
@@ -179,6 +183,15 @@ function App() {
       notify('已添加到历史记录');
     } catch {
       notify('请允许剪贴板访问，或手动输入文本');
+    }
+  }
+
+  async function handleScreenshot() {
+    try {
+      await startScreenshot();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      notify(message || (zh ? '无法启动截图' : 'Unable to start screenshot'));
     }
   }
 
@@ -257,6 +270,7 @@ function App() {
             setCaptureDraft={setCaptureDraft}
             setSeparator={setSeparator}
             onCapture={handleCapture}
+            onScreenshot={handleScreenshot}
             onToggleSelect={(id) =>
               setSelected((current) =>
                 current.includes(id) ? current.filter((value) => value !== id) : [...current, id],
@@ -277,7 +291,6 @@ function App() {
               notify('已清除未置顶记录');
             }}
             onCopy={handleCopy}
-            onPaste={handlePaste}
             onMerge={handleMerge}
             language={settings.language}
             onDeleteSelected={async () => {
@@ -345,12 +358,12 @@ interface HistoryProps {
   setCaptureDraft: (text: string) => void;
   setSeparator: (text: string) => void;
   onCapture: () => void;
+  onScreenshot: () => void;
   onToggleSelect: (id: number) => void;
   onFavorite: (id: number) => void;
   onDelete: (id: number) => void;
   onClear: () => void;
   onCopy: (item: ClipboardItem) => void;
-  onPaste: (item: ClipboardItem) => void;
   onMerge: (copyOnly: boolean) => void;
   onDeleteSelected: () => void;
   language: AppSettings['language'];
@@ -405,7 +418,7 @@ function HistoryView(props: HistoryProps) {
               >
                 {props.selected.includes(item.id) && <Check size={17} strokeWidth={3} />}
               </button>
-              <div className="item-body" onDoubleClick={() => props.onPaste(item)}>
+              <div className="item-body">
                 <div className="item-meta">
                   <span className={`type ${item.itemType}`}>
                     {item.itemType === 'image' && <ImageIcon size={11} />}
@@ -425,9 +438,6 @@ function HistoryView(props: HistoryProps) {
               <div className="item-actions">
                 <button title={zh ? '复制' : 'Copy'} onClick={() => props.onCopy(item)}>
                   <Copy size={16} />
-                </button>
-                <button title={zh ? '快速粘贴' : 'Quick paste'} onClick={() => props.onPaste(item)}>
-                  <Scissors size={16} />
                 </button>
                 <button title={zh ? '置顶' : 'Pin'} onClick={() => props.onFavorite(item.id)}>
                   {item.isFavorite ? <PinOff size={16} /> : <Pin size={16} />}
@@ -466,12 +476,151 @@ function HistoryView(props: HistoryProps) {
               ? '捕获当前剪贴板'
               : 'Capture clipboard'}
         </button>
+        <button className="secondary wide" onClick={props.onScreenshot}>
+          <Scissors size={15} />
+          {zh ? '屏幕截图' : 'Screenshot'}
+        </button>
         <div className="tip">
           <Keyboard size={15} />
-          {zh ? '双击记录即可快速粘贴' : 'Double-click an item to paste'}
+          {zh ? '点击复制按钮即可写入剪贴板' : 'Click copy to write an item to the clipboard'}
         </div>
       </aside>
     </section>
+  );
+}
+
+function ScreenshotOverlay() {
+  const [selection, setSelection] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const startPoint = useRef<{ x: number; y: number } | null>(null);
+  const selectionRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
+
+  useEffect(() => {
+    void getScreenshotSession()
+      .then(() => undefined)
+      .catch(() => cancelScreenshot());
+  }, []);
+
+  useEffect(() => {
+    let dispose: (() => void) | undefined;
+    void import('@tauri-apps/api/event').then(({ listen }) =>
+      listen('screenshot-session-started', () => {
+        startPoint.current = null;
+        setIsDragging(false);
+        setIsSubmitting(false);
+        updateSelection(null);
+      }).then((fn) => {
+        dispose = fn;
+      }),
+    );
+    return () => dispose?.();
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') void cancelCurrentScreenshot();
+      if (event.key === 'Enter' && selection) void submitSelection(selection);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [selection]);
+
+  const normalize = (start: { x: number; y: number }, end: { x: number; y: number }) => ({
+    x: Math.min(start.x, end.x),
+    y: Math.min(start.y, end.y),
+    width: Math.abs(end.x - start.x),
+    height: Math.abs(end.y - start.y),
+  });
+
+  const updateSelection = (rect: { x: number; y: number; width: number; height: number } | null) => {
+    selectionRef.current = rect;
+    setSelection(rect);
+  };
+
+  const resetSelection = () => {
+    startPoint.current = null;
+    setIsDragging(false);
+    updateSelection(null);
+  };
+
+  const cancelCurrentScreenshot = async () => {
+    if (isSubmitting) return;
+    resetSelection();
+    await cancelScreenshot();
+  };
+
+  const submitSelection = async (rect: { x: number; y: number; width: number; height: number }) => {
+    if (isSubmitting) return;
+    if (rect.width < 3 || rect.height < 3) {
+      await cancelCurrentScreenshot();
+      return;
+    }
+    setIsSubmitting(true);
+    try {
+      await finishScreenshot({
+        ...rect,
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
+      });
+    } catch (error) {
+      setIsSubmitting(false);
+      throw error;
+    }
+  };
+
+  return (
+    <main
+      className={isSubmitting ? 'snip-overlay submitting' : 'snip-overlay'}
+      onPointerDown={(event) => {
+        if (isSubmitting) return;
+        if ((event.target as HTMLElement).closest('.snip-toolbar')) return;
+        startPoint.current = { x: event.clientX, y: event.clientY };
+        setIsDragging(true);
+        updateSelection({ x: event.clientX, y: event.clientY, width: 0, height: 0 });
+      }}
+      onPointerMove={(event) => {
+        if (isSubmitting) return;
+        if (!startPoint.current) return;
+        updateSelection(normalize(startPoint.current, { x: event.clientX, y: event.clientY }));
+      }}
+      onPointerUp={() => {
+        startPoint.current = null;
+        setIsDragging(false);
+      }}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        void cancelCurrentScreenshot();
+      }}
+    >
+      <div className="snip-shade" />
+      {selection && (
+        <div
+          className="snip-selection"
+          style={{
+            left: selection.x,
+            top: selection.y,
+            width: selection.width,
+            height: selection.height,
+          }}
+        >
+          <span>
+            {Math.round(selection.width)} x {Math.round(selection.height)}
+          </span>
+          {!isDragging && !isSubmitting && selection.width >= 3 && selection.height >= 3 && (
+            <div className="snip-toolbar">
+              <button title="确认" onClick={() => void submitSelection(selection)}>
+                <Check size={16} />
+              </button>
+              <button title="取消" onClick={() => void cancelCurrentScreenshot()}>
+                <X size={16} />
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+      <div className="snip-hint">拖拽选择截图区域，点击确认保存，右键或 Esc 取消</div>
+    </main>
   );
 }
 
@@ -691,10 +840,10 @@ function SettingsView({
     },
   ];
   const changed = JSON.stringify(draft) !== JSON.stringify(settings);
-  const validHotkey =
-    /^(Ctrl|Control|Alt|Shift|Super|Meta)(\+(Ctrl|Control|Alt|Shift|Super|Meta))*\+[A-Za-z0-9]$/i.test(
-      draft.hotkey.trim(),
-    );
+  const hotkeyPattern =
+    /^(Ctrl|Control|Alt|Shift|Super|Meta|Win|Windows)(\+(Ctrl|Control|Alt|Shift|Super|Meta|Win|Windows))*\+([A-Za-z0-9]|F[1-9]|F1[0-2])$/i;
+  const validHotkey = hotkeyPattern.test(draft.hotkey.trim());
+  const validScreenshotHotkey = hotkeyPattern.test(draft.screenshotHotkey.trim());
   return (
     <section className="settings-card">
       {toggles.map((toggle) => (
@@ -726,6 +875,22 @@ function SettingsView({
           />
           {!validHotkey && (
             <small>{zh ? '请使用如 Ctrl+Shift+V 的组合键' : 'Use a combination like Ctrl+Shift+V'}</small>
+          )}
+        </div>
+      </div>
+      <div className="setting-row fields">
+        <div>
+          <strong>{zh ? '截图快捷键' : 'Screenshot shortcut'}</strong>
+          <p>{zh ? '在任何应用中进入屏幕截图模式' : 'Start screenshot mode from any application'}</p>
+        </div>
+        <div className="hotkey-field">
+          <input
+            aria-label={zh ? '截图快捷键' : 'Screenshot shortcut'}
+            value={draft.screenshotHotkey}
+            onChange={(event) => setDraft({ ...draft, screenshotHotkey: event.target.value })}
+          />
+          {!validScreenshotHotkey && (
+            <small>{zh ? '请使用如 Win+F1 的组合键' : 'Use a combination like Win+F1'}</small>
           )}
         </div>
       </div>
@@ -779,11 +944,15 @@ function SettingsView({
         </button>
         <button
           className="primary"
-          disabled={!changed || saving || !validHotkey}
+          disabled={!changed || saving || !validHotkey || !validScreenshotHotkey}
           onClick={async () => {
             setSaving(true);
             try {
-              await onChange({ ...draft, hotkey: draft.hotkey.trim() });
+              await onChange({
+                ...draft,
+                hotkey: draft.hotkey.trim(),
+                screenshotHotkey: draft.screenshotHotkey.trim(),
+              });
             } finally {
               setSaving(false);
             }

@@ -68,6 +68,14 @@ body {
   background: radial-gradient(circle at 80% -10%, var(--page-glow), transparent 39%), var(--page);
 }
 
+body:has(.snip-overlay) {
+  background: transparent;
+}
+
+html:has(.snip-overlay) {
+  background: transparent;
+}
+
 button,
 input,
 select,
@@ -597,6 +605,90 @@ h1 {
   margin: 18px 3px 2px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.snip-overlay {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  cursor: crosshair;
+  user-select: none;
+  background: transparent;
+}
+
+.snip-overlay.submitting {
+  cursor: progress;
+  pointer-events: none;
+}
+
+.snip-shade {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.36);
+  pointer-events: none;
+}
+
+.snip-overlay.submitting .snip-selection,
+.snip-overlay.submitting .snip-hint {
+  visibility: hidden;
+}
+
+.snip-selection {
+  position: absolute;
+  border: 2px solid #37d79b;
+  background: rgba(55, 215, 155, 0.08);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.46);
+  pointer-events: auto;
+}
+
+.snip-selection span {
+  position: absolute;
+  left: 0;
+  top: -31px;
+  min-width: 82px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  color: #f8fffc;
+  font-size: 12px;
+  background: rgba(16, 24, 21, 0.82);
+}
+
+.snip-toolbar {
+  position: absolute;
+  right: 0;
+  bottom: -43px;
+  display: flex;
+  gap: 6px;
+  padding: 5px;
+  border-radius: 8px;
+  background: rgba(16, 24, 21, 0.86);
+  pointer-events: auto;
+}
+
+.snip-toolbar button {
+  display: grid;
+  place-items: center;
+  width: 31px;
+  height: 31px;
+  border-radius: 7px;
+  color: #f8fffc;
+}
+
+.snip-toolbar button:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.snip-hint {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  padding: 8px 12px;
+  border-radius: 8px;
+  color: #f8fffc;
+  font-size: 13px;
+  background: rgba(16, 24, 21, 0.78);
+  pointer-events: none;
 }
 
 .page-card,
